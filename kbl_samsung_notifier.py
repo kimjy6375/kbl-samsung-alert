@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-🏀 서울 삼성 썬더스 (Seoul Samsung Thunders) KBL 실시간 스마트폰 푸시 알림봇 v3.0
-   (컴퓨터를 완전히 꺼두어도 작동하는 무료 클라우드 GitHub Actions 완벽 호환 버전)
+🏀 서울 삼성 썬더스 (Seoul Samsung Thunders) KBL 실시간 스마트폰 푸시 알림봇 v3.2
+   (경기 당일 사전 감시 브리핑 + 실시간 로그 기록 + --status 상태 점검 탑재 버전)
 ================================================================================
 - 데이터 출처: 네이버 스포츠 API (api-gw.sports.naver.com) & KBL 공식 API (api.kbl.or.kr)
 - 대상 경기: 서울 삼성 썬더스 (팀 코드: 35) 전 경기 자동 필터링
-- 시간대 기준: 대한민국 표준시 (KST, UTC+9) 고정 — 해외 클라우드 서버에서도 정확한 시간 작동
+- 시간대 기준: 대한민국 표준시 (KST, UTC+9) 고정
 - 핵심 맞춤형 알림 기능:
+  0) [경기 당일 감시 예약 확인 알림] 오늘 서울 삼성 경기가 있는 날에는 경기 발견 즉시
+     "오늘 몇 시 경기 감시 대기 중이며 몇 시(30분 전)에 라인업을 보낸다"고 사전 브리핑 푸시 발송!
   1) [경기 시작 30분 전] 양 팀 선발 라인업(베스트 5) 알림
   2) [1~3쿼터 종료 시점] 각 쿼터 내용 요약 알림
      - 서울 삼성 선수: 득점 + 리바운드/어시스트 등 구체적 기록 표기
@@ -22,10 +24,10 @@
      - 서울 삼성 주요 선수들의 핵심 기록 맞춤형 요약
        (예: 경기 MVP 칸터 32점 13리바운드, 이규태 15점 3점슛 3/6,
             한호빈 12점 6어시스트, 구탕 11점 5리바운드 4어시스트)
-  5) [컴퓨터 전원 OFF 지원]
-     - 클라우드 스마트 실행 모드: python kbl_samsung_notifier.py --cloud-auto
-       (오늘 삼성 경기가 없으면 1초 만에 자동 종료, 경기가 있으면 경기 30분 전부터
-        경기 끝날 때까지 25초 주기로 실시간 감시 후 자동 종료!)
+  5) [제대로 반영되는지 확인하는 3가지 장치]
+     - 장치 A: 경기 당일 자동 사전 브리핑 푸시 (MATCHDAY_READY)
+     - 장치 B: 실시간 작동 기록 파일 자동 저장 (kbl_samsung_monitor.log)
+     - 장치 C: 즉시 상태 진단 및 지난 경기 실전 검증 명령어 (--status / --date YYYY-MM-DD)
 ================================================================================
 """
 
@@ -47,7 +49,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-# 대한민국 표준시 (KST = UTC+9) — 해외 클라우드(GitHub Actions 등)에서도 한국 시간 기준 작동
+# 대한민국 표준시 (KST = UTC+9)
 KST = datetime.timezone(datetime.timedelta(hours=9))
 
 
@@ -56,31 +58,38 @@ def now_kst() -> datetime.datetime:
 
 
 # ==============================================================================
-# 1. 사용자 환경 설정 (초기 세팅 시 NTFY_TOPIC만 확인하세요!)
+# 1. 사용자 환경 설정
 # ==============================================================================
 
-# 스마트폰 'ntfy' 앱에서 구독(Subscribe)한 토픽 이름과 똑같이 적어주세요.
 NTFY_TOPIC: str = os.environ.get("NTFY_TOPIC", "samsung-thunders-kbl-alert")
 NTFY_SERVER: str = "https://ntfy.sh"
 
-# 선택 사항: 텔레그램 / 디스코드 동시 발송용
 TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID: str = os.environ.get("TELEGRAM_CHAT_ID", "")
 DISCORD_WEBHOOK_URL: str = os.environ.get("DISCORD_WEBHOOK_URL", "")
 
-# 응원 팀 고정 (서울 삼성 썬더스)
 TARGET_TEAM_NAME: str = "서울 삼성"
 TARGET_TEAM_SHORT: str = "삼성"
 TARGET_KBL_TEAM_CODE: str = "35"
 
-# 경기 시작 몇 분 전부터 선발 라인업 알림을 보낼지 설정 (기본: 30분 전)
 LINEUP_ALERT_MINUTES_BEFORE: int = 30
-
-# 실시간 조회 주기 (초 단위)
 POLL_INTERVAL_SECONDS: int = 25
 
-# 발송 상태 및 쿼터별 누적 기록 저장 파일
-STATE_FILE_PATH: Path = Path(__file__).resolve().parent / "kbl_samsung_state.json"
+BASE_DIR: Path = Path(__file__).resolve().parent
+STATE_FILE_PATH: Path = BASE_DIR / "kbl_samsung_state.json"
+LOG_FILE_PATH: Path = BASE_DIR / "kbl_samsung_monitor.log"
+
+
+def write_monitor_log(message: str) -> None:
+    """폴더 내 kbl_samsung_monitor.log 파일에 실시간 작동 상태를 기록합니다."""
+    ts = now_kst().strftime("%Y-%m-%d %H:%M:%S KST")
+    line = f"[{ts}] {message}\n"
+    print(line, end="")
+    try:
+        with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 
 # ==============================================================================
@@ -89,7 +98,6 @@ STATE_FILE_PATH: Path = Path(__file__).resolve().parent / "kbl_samsung_state.jso
 
 @dataclass
 class PlayerStat:
-    """개별 선수의 박스스코어 기록 모델"""
     player_id: str
     name: str
     team: str
@@ -102,14 +110,13 @@ class PlayerStat:
     steals: int = 0
     blocks: int = 0
     turnovers: int = 0
-    three_pm: int = 0   # 3점슛 성공 개수
-    three_pa: int = 0   # 3점슛 시도 개수
+    three_pm: int = 0
+    three_pa: int = 0
     fg_missed: int = 0
     ft_missed: int = 0
     fouls: int = 0
 
     def calculate_kbl_contribution(self, is_winning_team: bool = False) -> float:
-        """KBL 공헌도 산출 공식"""
         score = (
             self.points * 1.0
             + self.rebounds * 1.2
@@ -128,10 +135,6 @@ class PlayerStat:
         return round(score, 1)
 
     def format_samsung_quarter_line(self) -> str:
-        """
-        [요구사항 2] 1~3쿼터 종료 시 서울 삼성 선수용 구체적 기록 포맷
-        예: '칸터 12점 3리바운드', '맥컬러 8점 3리바운드', '이관희 6점 3어시스트'
-        """
         parts = [f"{self.name} {self.points}점"]
         if self.rebounds >= 2:
             parts.append(f"{self.rebounds}리바운드")
@@ -146,21 +149,9 @@ class PlayerStat:
         return " ".join(parts)
 
     def format_opponent_quarter_line(self) -> str:
-        """
-        [요구사항 2] 1~3쿼터 종료 시 상대 팀 선수용 간단 득점 포맷
-        예: '베스 8점', '문정현 5점'
-        """
         return f"{self.name} {self.points}점"
 
     def format_samsung_final_key_line(self, is_mvp: bool = False) -> str:
-        """
-        [요구사항 3] 경기 종료 후 서울 삼성 주요 선수 핵심 기록 포맷
-        예:
-        - 경기 MVP 칸터 32점 13리바운드
-        - 이규태 15점 3점슛 3/6
-        - 한호빈 12점 6어시스트
-        - 구탕 11점 5리바운드 4어시스트
-        """
         prefix = f"👑 경기 MVP {self.name}" if is_mvp else f"• {self.name}"
         details = [f"{self.points}점"]
 
@@ -183,14 +174,14 @@ class PlayerStat:
 
 @dataclass
 class GameSnapshot:
-    """실시간 경기 스냅샷"""
     game_id: str
     game_date: str
-    start_time: str  # "HH:MM" (KST)
+    start_time: str
     venue: str
     home_team: str
     away_team: str
     status_code: str
+    source_name: str = "네이버 스포츠 / KBL 공식 API"
     current_period: int = 0
     is_period_finished: bool = False
     is_game_finished: bool = False
@@ -313,6 +304,32 @@ def evaluate_mvp_and_samsung_leaders(
 # ==============================================================================
 # 4. 알림 메시지 포맷터
 # ==============================================================================
+
+def format_matchday_ready_message(snap: GameSnapshot) -> Tuple[str, str]:
+    """
+    경기 당일 경기가 감지되었을 때 '오늘 경기 감시가 정상 작동 중임'을 알려주는 사전 확인 브리핑
+    """
+    try:
+        t_obj = datetime.datetime.strptime(snap.start_time, "%H:%M")
+        lineup_dt = t_obj - datetime.timedelta(minutes=LINEUP_ALERT_MINUTES_BEFORE)
+        lineup_time_str = lineup_dt.strftime("%H:%M")
+    except Exception:
+        lineup_time_str = f"시작 {LINEUP_ALERT_MINUTES_BEFORE}분 전"
+
+    title = f"[오늘의 경기 감시 예약 완료] {snap.away_team} vs {snap.home_team} ({snap.start_time})"
+    lines = [
+        f"✅ 오늘 서울 삼성 썬더스 경기가 정상적으로 감지되어 실시간 감시 대기 중입니다!",
+        f"• 대진: {snap.away_team} vs {snap.home_team}",
+        f"• 일시 및 장소: {snap.game_date} {snap.start_time} ({snap.venue})",
+        f"• 데이터 연동: {snap.source_name}",
+        "",
+        "📅 [오늘 자동 발송 예정 스케줄]",
+        f"  1) {lineup_time_str}경 (경기 30분 전): 양 팀 선발 라인업 알림",
+        "  2) 1~3쿼터 종료 시: 쿼터 점수 및 삼성·상대팀 선수 활약 요약",
+        "  3) 4쿼터 및 연장 종료 시: 최종 스코어 + 경기 MVP + 삼성 주요 선수 기록",
+    ]
+    return title, "\n".join(lines)
+
 
 def format_lineup_message(snap: GameSnapshot) -> Tuple[str, str]:
     title = f"[경기 시작 30분 전 · 선발 라인업] {snap.away_team} vs {snap.home_team}"
@@ -444,7 +461,7 @@ def format_final_result_message(snap: GameSnapshot, went_to_overtime: bool) -> T
 
 
 # ==============================================================================
-# 5. 스마트폰 푸시 알림 발송 모듈 (ntfy / Telegram / Discord)
+# 5. 스마트폰 푸시 알림 발송 모듈
 # ==============================================================================
 
 class PushNotifier:
@@ -470,6 +487,7 @@ class PushNotifier:
         print("-" * 70)
         print(message)
         print(f"{border}\n")
+        write_monitor_log(f"푸시 발송: {title}")
 
         if self.dry_run:
             return
@@ -518,7 +536,7 @@ class PushNotifier:
         req = urllib.request.Request(
             self.discord_webhook,
             data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": "KBL-Samsung-Notifier/3.0"},
+            headers={"Content-Type": "application/json", "User-Agent": "KBL-Samsung-Notifier/3.2"},
             method="POST",
         )
         try:
@@ -605,6 +623,7 @@ class KBLDataFetcher:
             home_team=str(target_game.get("homeTeamName", "홈팀")),
             away_team=str(target_game.get("awayTeamName", "원정팀")),
             status_code=status_code_raw,
+            source_name="네이버 스포츠 API (실시간 연동)",
             home_score=int(target_game.get("homeTeamScore", 0) or 0),
             away_score=int(target_game.get("awayTeamScore", 0) or 0),
         )
@@ -732,6 +751,7 @@ class KBLDataFetcher:
             home_team=home_team,
             away_team=away_team,
             status_code="END" if is_ended else "LIVE",
+            source_name="KBL 공식 API (api.kbl.or.kr)",
             is_game_finished=is_ended,
             home_score=int(target.get("scoreH", 0) or 0),
             away_score=int(target.get("scoreA", 0) or 0),
@@ -786,7 +806,6 @@ class SamsungGameMonitor:
 
     @staticmethod
     def minutes_until_tipoff(snap: GameSnapshot) -> Optional[float]:
-        """경기 시작 시각(KST)까지 남은 시간(분) 반환"""
         try:
             naive_dt = datetime.datetime.strptime(f"{snap.game_date} {snap.start_time}", "%Y-%m-%d %H:%M")
             game_dt = naive_dt.replace(tzinfo=KST)
@@ -800,8 +819,26 @@ class SamsungGameMonitor:
             return True
         return -5.0 <= mins <= (LINEUP_ALERT_MINUTES_BEFORE + 5.0)
 
-    def process_snapshot(self, snap: GameSnapshot, force_lineup_now: bool = False) -> None:
+    def process_snapshot(
+        self,
+        snap: GameSnapshot,
+        force_lineup_now: bool = False,
+        include_matchday_ready: bool = True,
+    ) -> None:
         gid = snap.game_id
+
+        # 0) 경기 당일 경기 발견 시 1회 사전 브리핑 푸시 발송 (정상 작동 확인용!)
+        ready_key = f"{gid}:MATCHDAY_READY"
+        if (
+            include_matchday_ready
+            and ready_key not in self.sent_events
+            and not snap.is_game_finished
+            and snap.current_period == 0
+        ):
+            title, body = format_matchday_ready_message(snap)
+            self.notifier.send(title, body, tags="bell,basketball", priority="default")
+            self.sent_events.add(ready_key)
+            self._save_state()
 
         # 1) 경기 시작 30분 전 양 팀 선발 라인업 알림
         lineup_key = f"{gid}:LINEUP_30M"
@@ -910,6 +947,7 @@ class SamsungGameMonitor:
             home_team=snap.home_team,
             away_team=snap.away_team,
             status_code=f"Q{quarter}_END",
+            source_name=snap.source_name,
             current_period=quarter,
             is_period_finished=True,
             is_game_finished=False,
@@ -925,68 +963,113 @@ class SamsungGameMonitor:
 
 
 # ==============================================================================
-# 8. 컴퓨터 전원 OFF용 클라우드(GitHub Actions) 스마트 실행 및 자동 생성기
+# 8. 상태 진단 리포트 (--status) 및 클라우드/윈도우 헬퍼
 # ==============================================================================
 
+def run_status_check(fetcher: KBLDataFetcher, monitor: SamsungGameMonitor, notifier: PushNotifier, target_date: str) -> None:
+    """
+    현재 프로그램이 각 경기 데이터를 정상적으로 가져오고 있는지 진단하여
+    화면 출력 및 핸드폰 푸시로 점검 리포트를 보내줍니다.
+    """
+    print("=" * 70)
+    print(f"🔍 [서울 삼성 썬더스 알림봇 실시간 연동 진단 리포트] (기준일: {target_date})")
+    print("=" * 70)
+
+    snap = fetcher.fetch_today_samsung_game(target_date=target_date)
+    sent_for_today = [ev for ev in sorted(monitor.sent_events)]
+
+    if snap:
+        status_title = f"[상태 점검 정상] {target_date} {snap.away_team} vs {snap.home_team} 연동 확인"
+        lines = [
+            f"✅ 데이터 수집 상태: 정상 ({snap.source_name})",
+            f"• 조회 경기: {snap.away_team} vs {snap.home_team} ({snap.game_date} {snap.start_time})",
+            f"• 경기장: {snap.venue}",
+            f"• 현재 상태 코드: {snap.status_code} (스코어 {snap.away_score} : {snap.home_score})",
+            f"• 선발 명단 수집 여부: {'수집 완료' if (snap.home_starters or snap.away_starters) else '발표 전 대기 중'}",
+            f"• 선수 박스스코어 수집: {len(snap.players)}명 데이터 확인됨",
+            f"• 누적 발송 완료 알림 수: {len(sent_for_today)}건",
+            f"• 로컬 로그 파일 위치: {LOG_FILE_PATH.name}",
+        ]
+    else:
+        status_title = f"[상태 점검 완료] {target_date} 서울 삼성 경기 일정 확인"
+        lines = [
+            f"✅ 알림봇 작동 상태: 정상 가동 중 (토픽: {notifier.ntfy_topic})",
+            f"• {target_date} 당일 예정된 서울 삼성 경기가 없거나 네트워크 오프라인 상태입니다.",
+            f"• 팁: 지난 경기 반영 테스트는 --date 2026-10-30 옵션을 붙여 확인하실 수 있습니다.",
+            f"• 누적 발송 기록 파일: {STATE_FILE_PATH.name} ({len(sent_for_today)}건 저장됨)",
+            f"• 실시간 작동 로그 파일: {LOG_FILE_PATH.name}",
+        ]
+
+    notifier.send(status_title, "\n".join(lines), tags="mag,basketball", priority="default")
+
+
 def run_cloud_auto_session(fetcher: KBLDataFetcher, monitor: SamsungGameMonitor, target_date: str) -> None:
-    """
-    [컴퓨터가 꺼져 있어도 작동하는 무료 클라우드(GitHub Actions) 전용 스마트 세션]
-    - 오늘 서울 삼성 경기가 없으면: 1초 만에 즉시 종료 (무료 시간 전혀 소모 안 함!)
-    - 오늘 서울 삼성 경기가 있으면: 경기 35분 전까지 대기했다가, 경기 시작 30분 전 라인업부터
-      1~4쿼터/연장 종료까지 25초 주기로 실시간 감시한 뒤 경기가 끝나면 자동으로 서버 종료!
-    """
     snap = fetcher.fetch_today_samsung_game(target_date=target_date)
     if not snap:
-        print(f"ℹ️ [{target_date}] 오늘 예정된 서울 삼성 썬더스 경기가 없어 클라우드 세션을 즉시 종료합니다.")
+        write_monitor_log(f"[{target_date}] 예정된 서울 삼성 경기가 없어 클라우드 세션을 종료합니다.")
         return
 
-    print(f"🏀 [{target_date}] 오늘 서울 삼성 경기 발견! ({snap.away_team} vs {snap.home_team}, {snap.start_time} KST)")
+    write_monitor_log(f"[{target_date}] 오늘 서울 삼성 경기 발견! ({snap.away_team} vs {snap.home_team}, {snap.start_time} KST)")
+    # 경기 발견 즉시 사전 브리핑 푸시 1회 전송
+    monitor.process_snapshot(snap, include_matchday_ready=True)
 
-    # 만약 경기 시작까지 45분 이상 남아있다면, 이번 스케줄러가 아닌 다음 시간대 스케줄러에 맡기고 종료
     mins_left = monitor.minutes_until_tipoff(snap)
     if mins_left is not None and mins_left > 65.0:
-        print(f"⏳ 경기 시작까지 약 {int(mins_left)}분 남아있어 다음 클라우드 트리거에서 감시를 시작합니다.")
+        write_monitor_log(f"경기 시작까지 약 {int(mins_left)}분 남아있어 다음 클라우드 트리거에서 본 감시를 이어갑니다.")
         return
 
-    # 최대 4시간 30분 동안 25초 간격으로 실시간 추적
     max_loops = int((4.5 * 3600) / POLL_INTERVAL_SECONDS)
     for _ in range(max_loops):
         current_snap = fetcher.fetch_today_samsung_game(target_date=target_date)
         if current_snap:
-            monitor.process_snapshot(current_snap)
+            monitor.process_snapshot(current_snap, include_matchday_ready=True)
             if current_snap.is_game_finished:
-                print("✅ 오늘 서울 삼성 경기 최종 종료 알림까지 모두 발송 완료! 클라우드 세션을 종료합니다.")
+                write_monitor_log("오늘 서울 삼성 경기 최종 종료 알림까지 모두 발송 완료! 세션을 종료합니다.")
                 return
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-def register_windows_autostart(topic: str) -> None:
-    script_path = Path(__file__).resolve()
+def ensure_windows_autostart_registered(topic: str, notifier: Optional[PushNotifier] = None) -> bool:
     if platform.system() != "Windows":
-        print("ℹ️ 현재 환경은 Windows가 아닙니다.")
-        return
+        return False
 
+    script_path = Path(__file__).resolve()
     appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return False
+
     startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
     startup_dir.mkdir(parents=True, exist_ok=True)
+    vbs_path = startup_dir / "KBL_Samsung_Thunders_Notifier.vbs"
 
+    already_existed = vbs_path.exists()
     python_exe = Path(sys.executable)
     pythonw_exe = python_exe.with_name("pythonw.exe")
     runner = str(pythonw_exe if pythonw_exe.exists() else python_exe)
 
-    vbs_path = startup_dir / "KBL_Samsung_Thunders_Notifier.vbs"
     vbs_content = (
         'Set WshShell = CreateObject("WScript.Shell")\n'
         f'WshShell.Run """{runner}"" ""{script_path}"" --topic ""{topic}""", 0, False\n'
     )
     vbs_path.write_text(vbs_content, encoding="utf-8")
 
-    try:
-        subprocess.Popen([runner, str(script_path), "--topic", topic], close_fds=True)
-    except Exception:
-        pass
+    if not already_existed and notifier is not None:
+        notifier.send(
+            "[초기 세팅 완료] 서울 삼성 썬더스 자동 알림봇 등록 성공!",
+            "윈도우 백그라운드 자동 시작 등록이 완료되었습니다! 경기 있는 날에는 경기 전 사전 브리핑 알림과 30분 전 선발 라인업, 1~4쿼터 요약, 최종 MVP 알림이 자동으로 도착합니다.",
+            tags="white_check_mark,basketball",
+            priority="high",
+        )
+    return True
 
-    print("✅ [윈도우 자동 실행 등록 완료] 경로:", vbs_path)
+
+def register_windows_autostart(topic: str) -> None:
+    notifier = PushNotifier(ntfy_topic=topic)
+    ok = ensure_windows_autostart_registered(topic=topic, notifier=notifier)
+    if ok:
+        print("✅ [윈도우 자동 실행 등록 완료] 이제 핸드폰으로 푸시 알림이 자동 발송됩니다!")
+    else:
+        print("ℹ️ 현재 환경은 Windows가 아닙니다.")
 
 
 # ==============================================================================
@@ -1084,7 +1167,7 @@ def run_demo_simulation(notifier: PushNotifier, include_overtime: bool = True, d
         home_starters=home_starters,
         away_starters=away_starters,
     )
-    monitor.process_snapshot(snap_pre, force_lineup_now=True)
+    monitor.process_snapshot(snap_pre, force_lineup_now=True, include_matchday_ready=True)
     time.sleep(delay_sec)
 
     for q in (1, 2, 3):
@@ -1106,7 +1189,7 @@ def run_demo_simulation(notifier: PushNotifier, include_overtime: bool = True, d
             away_starters=away_starters,
             quarter_only_players=q_player_samples[q],
         )
-        monitor.process_snapshot(snap_q)
+        monitor.process_snapshot(snap_q, include_matchday_ready=False)
         time.sleep(delay_sec)
 
     if include_overtime:
@@ -1129,7 +1212,7 @@ def run_demo_simulation(notifier: PushNotifier, include_overtime: bool = True, d
             away_starters=away_starters,
             quarter_only_players=q_player_samples[4],
         )
-        monitor.process_snapshot(snap_q4)
+        monitor.process_snapshot(snap_q4, include_matchday_ready=False)
         time.sleep(delay_sec)
 
     snap_final = GameSnapshot(
@@ -1151,7 +1234,7 @@ def run_demo_simulation(notifier: PushNotifier, include_overtime: bool = True, d
         away_starters=away_starters,
         players=final_players,
     )
-    monitor.process_snapshot(snap_final)
+    monitor.process_snapshot(snap_final, include_matchday_ready=False)
 
 
 # ==============================================================================
@@ -1160,20 +1243,13 @@ def run_demo_simulation(notifier: PushNotifier, include_overtime: bool = True, d
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="🏀 서울 삼성 썬더스 KBL 실시간 스마트폰 푸시 알림봇 v3.0"
+        description="🏀 서울 삼성 썬더스 KBL 실시간 스마트폰 푸시 알림봇 v3.2"
     )
     parser.add_argument("--topic", type=str, default=NTFY_TOPIC, help="ntfy 스마트폰 푸시 토픽 이름")
     parser.add_argument("--date", type=str, default=None, help="조회 날짜 (YYYY-MM-DD, KST 기준)")
-    parser.add_argument(
-        "--cloud-auto",
-        action="store_true",
-        help="[컴퓨터 전원 OFF 클라우드용] 오늘 삼성 경기가 있을 때만 경기 끝날 때까지 감시 후 자동 종료",
-    )
-    parser.add_argument(
-        "--register-windows",
-        action="store_true",
-        help="윈도우 시작프로그램에 백그라운드 자동 실행 등록",
-    )
+    parser.add_argument("--status", action="store_true", help="현재 연동 상태 진단 및 핸드폰 확인 푸시 발송")
+    parser.add_argument("--cloud-auto", action="store_true", help="클라우드 자동 실행 모드")
+    parser.add_argument("--register-windows", action="store_true", help="윈도우 시작프로그램 자동 실행 등록")
     parser.add_argument("--once", action="store_true", help="1회 조회 후 종료")
     parser.add_argument("--demo", action="store_true", help="정규 4쿼터 종료 시나리오 푸시 테스트")
     parser.add_argument("--demo-ot", action="store_true", help="연장전(OT) 시나리오 푸시 테스트")
@@ -1185,6 +1261,13 @@ def main() -> None:
         return
 
     notifier = PushNotifier(ntfy_topic=args.topic, dry_run=args.dry_run)
+    fetcher = KBLDataFetcher()
+    monitor = SamsungGameMonitor(notifier=notifier, persist_state=True)
+    today_str = args.date or now_kst().strftime("%Y-%m-%d")
+
+    if args.status:
+        run_status_check(fetcher=fetcher, monitor=monitor, notifier=notifier, target_date=today_str)
+        return
 
     if args.demo or args.demo_ot:
         run_demo_simulation(
@@ -1194,9 +1277,7 @@ def main() -> None:
         )
         return
 
-    fetcher = KBLDataFetcher()
-    monitor = SamsungGameMonitor(notifier=notifier, persist_state=True)
-    today_str = args.date or now_kst().strftime("%Y-%m-%d")
+    ensure_windows_autostart_registered(topic=args.topic, notifier=notifier)
 
     if args.cloud_auto:
         run_cloud_auto_session(fetcher=fetcher, monitor=monitor, target_date=today_str)
@@ -1205,14 +1286,15 @@ def main() -> None:
     if args.once:
         snap = fetcher.fetch_today_samsung_game(target_date=today_str)
         if snap:
-            monitor.process_snapshot(snap)
+            monitor.process_snapshot(snap, include_matchday_ready=True)
         return
 
+    write_monitor_log(f"서울 삼성 썬더스 상시 감시 시작 (토픽: {args.topic})")
     while True:
         current_date = args.date or now_kst().strftime("%Y-%m-%d")
         snap = fetcher.fetch_today_samsung_game(target_date=current_date)
         if snap:
-            monitor.process_snapshot(snap)
+            monitor.process_snapshot(snap, include_matchday_ready=True)
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
